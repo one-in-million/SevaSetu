@@ -1,0 +1,39 @@
+# --- Python Specific ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+env/
+venv/
+ENV/
+
+# --- Environment & Secrets (CRITICAL) ---
+.env
+.flaskenv
+*.secret
+secrets.json
+
+# --- Databases & Vector Stores ---
+*.db
+*.sqlite3
+qdrant_storage/
+pgdata/
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- OS Specific ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Node/Frontend (If you have a React folder) ---
+node_modules/
+build/
+dist/
+.eslintcache
