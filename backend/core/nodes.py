@@ -19,7 +19,35 @@ def safe_llm_call(messages, retries=3, delay=1):
                 time.sleep(delay)
                 continue
             raise e
+# --- QUERY EXPANSION HELPER ---
+def expand_search_query(user_message: str):
+    """
+    Expands vague user queries into richer semantic search queries.
+    Improves vector retrieval accuracy.
+    """
+    expansion_prompt = f"""
+    Expand the following user request into a better semantic search query
+    for finding government schemes.
 
+    USER QUERY:
+    "{user_message}"
+
+    RULES:
+    - Add related keywords if useful
+    - Keep it under 20 words
+    - Do not explain anything
+    - Return ONLY the improved query
+
+    Example:
+    Input: farmer scheme
+    Output: government agriculture subsidy schemes for farmers India
+    """
+
+    response = safe_llm_call([
+        SystemMessage(content=expansion_prompt)
+    ])
+
+    return response.content.strip()
 # --- NODE 1: THE PROFILE MANAGER ---
 def profile_manager_node(state: AgentState):
     """
@@ -64,7 +92,7 @@ def profile_manager_node(state: AgentState):
         updated_profile = current_profile
 
     # Audit the profile for Case 2 (Personal Audit)
-    required_keys = ["age", "state", "income", "caste", "gender"]
+    required_keys = ["age", "state", "income", "caste", "gender","occupation"]
     missing = [k for k in required_keys if not updated_profile.get(k)]
 
     return {
@@ -76,34 +104,55 @@ def profile_manager_node(state: AgentState):
 
 # --- NODE 2: THE INTENT ROUTER ---
 def intent_router_node(state: AgentState):
-    print("🤖 [Node: Intent Router] Determining Path...")
+    print("🤖 [Node: Intent Router] Determining Path & Mode...")
 
     last_message = state["messages"][-1].content
-    
-    router_prompt = f"""
-    Analyze the user's intent based ONLY on their last message.
 
-    USER MESSAGE: "{last_message}"
+    router_prompt = f"""
+    Analyze the user's intent: "{last_message}"
 
     CATEGORIES:
-    1. 'direct_info': Use this if the user names a SPECIFIC scheme (e.g., 'PM-Kisan', 'Scholarship') 
-       or asks "What is [Scheme Name]?" or "Tell me about [Scheme Name]".
-    
-    2. 'eligibility_audit': Use this ONLY if the user is asking for recommendations for THEMSELVES 
-       (e.g., "What do I qualify for?", "Show me schemes for a student", "Check my eligibility").
+    1. 'eligibility_audit': User wants scheme recommendations based on their own profile
+       (e.g. "What schemes am I eligible for?", "What do I qualify for?").
+    2. 'direct_info': User mentions a SPECIFIC scheme name and wants it explained
+       (e.g. "Explain PM-Kisan", "Tell me about Ayushman Bharat").
+    3. 'state_search': User asks for schemes available in a specific state without naming a scheme
+       (e.g. "Schemes in Karnataka", "List Karnataka schemes").
 
-    RULE: If a specific scheme name is mentioned, it is ALWAYS 'direct_info'.
+    RESPONSE_MODE rules (strict):
+    - eligibility_audit  → response_mode = 'list_only'
+    - direct_info        → response_mode = 'full_detail'
+    - state_search       → response_mode = 'summary'
 
-    Respond with ONLY one word: 'direct_info' or 'eligibility_audit'.
+    Respond with ONLY a valid JSON object, no markdown:
+    {{
+      "intent": "eligibility_audit" | "direct_info" | "state_search",
+      "response_mode": "list_only" | "full_detail" | "summary",
+      "selected_scheme": "Exact scheme name if direct_info, else null",
+      "target_state": "State name if state_search, else null"
+    }}
     """
 
     response = safe_llm_call([SystemMessage(content=router_prompt)])
-    decision = response.content.strip().lower()
 
-    path = "direct_info" if "direct_info" in decision else "eligibility_audit"
-    print(f"   -> Corrected Path: {path.upper()}")
-    return {"messages": state["messages"],"intent": path}
+    try:
+        clean = response.content.strip().replace("```json", "").replace("```", "")
+        data = json.loads(clean)
+    except:
+        data = {"intent": "eligibility_audit", "response_mode": "list_only", "selected_scheme": None, "target_state": None}
 
+    print(f"   -> Path: {data['intent'].upper()} | Mode: {data['response_mode']}")
+
+    current_profile = state.get("user_profile", {})
+    if data.get("target_state"):
+        current_profile["state"] = data["target_state"]
+
+    return {
+        "intent": data["intent"],
+        "response_mode": data["response_mode"],
+        "selected_scheme": data.get("selected_scheme"),
+        "user_profile": current_profile
+    }
 def solicitor_node(state: AgentState):
     print("🤖 [Node: The Solicitor] Analyzing request context...")
     
@@ -145,7 +194,7 @@ def interviewer_node(state: AgentState):
     last_user_msg = state["messages"][-1].content
     
     # --- 1. DEFINE MANDATORY FIELDS ---
-    mandatory = ["age", "state", "income", "caste"]
+    mandatory = ["age", "state", "income", "caste", "gender"]
     
     # --- 2. CALCULATE MISSING FIELDS DYNAMICALLY ---
     missing = [field for field in mandatory if not profile.get(field)]
@@ -165,14 +214,16 @@ def interviewer_node(state: AgentState):
     USER'S LAST MESSAGE: "{last_user_msg}"
 
     STRICT INSTRUCTIONS:
+
     1. TONE: Be professional, warm, and friendly. Not over-the-top, but welcoming.
     2. QUANTITY: Ask for exactly TWO missing details from the list (if at least two are missing).
-    3. SITUATIONAL AWARENESS: 
-        - If the user just gave information you didn't ask for (e.g., you asked for age, they gave state), 
-          acknowledge it politely: "I've noted your [field], but I still need your [original field] to proceed."
-        - If they just introduced themselves, greet them by name.
-    4. NO HALLUCINATION: Do not make up facts about the user.
-    5. NO REPETITION: If they just provided a piece of info, don't ask for it again.
+    3. SITUATIONAL AWARENESS: Do NOT suggest or list any specific schemes yet. Simply acknowledge the information provided and explain that you are gathering details to perform a high-precision eligibility audit. Only ask for the missing fields.
+    4. DO NOT suggest, name, or guess any government schemes yet.
+    5. Acknowledge the info the user just gave (e.g., "Got it, you're from Karnataka").
+    6. State clearly that you need the remaining details to perform an accurate eligibility audit.
+    7. Ask for the MISSING FIELDS: {missing}.
+    8. NO HALLUCINATION: Do not make up facts about the user.
+    9. NO REPETITION: If they just provided a piece of info, don't ask for it again.
 
     Respond with a natural, conversational message.
     """
@@ -192,169 +243,278 @@ def interviewer_node(state: AgentState):
 
 
 
-# 1. Specialist: Direct Search (Case 1)
+
+
+# 1. Specialist: Direct & State Search (Case B & C)
 def direct_fetcher_node(state: AgentState):
-    print("🤖 [Node: Direct Fetcher] Performing merged dynamic search...")
-    
-    messages = state.get("messages", [])
-    if not messages: return {"matched_schemes": []}
-    
-    last_msg = messages[-1].content
+    print("🤖 [Node: Direct Fetcher] Handling Case B/C...")
+
+    mode = state.get("response_mode")
     profile = state.get("user_profile", {})
-    # Get the state, but default to an empty string if it's None
     user_state = profile.get("state") or ""
 
-    # 1. Determine Search Depth
-    # Only treat as state-only search if last_msg is short AND matches the stored state
-    is_state_only = False
-    if user_state and len(last_msg.split()) < 3:
-        if user_state.lower() in last_msg.lower():
-            is_state_only = True
-    
-    search_limit = 5 if is_state_only else 1
-
-    # 2. Extract Scheme Name
-    if not is_state_only:
-        name_prompt = f"Extract only the scheme name from: '{last_msg}'. Return only the name (e.g., 'PM-Kisan'). If no specific name exists, return 'NONE'."
-        extracted_name = safe_llm_call([SystemMessage(content=name_prompt)]).content.strip()
-        print(f"   🧠 Extracted name: {extracted_name}")
-    else:
-        extracted_name = "NONE"
-
     try:
-        # 3. Clean Query Construction (Fixes the "None" problem)
-        if extracted_name != "NONE" and len(extracted_name) > 2:
-            # Only add state if it's not empty
-            query = f"{extracted_name} {user_state}".strip()
-            print(f"   🔍 Searching by Name: '{query}'")
-        else:
-            query = f"{last_msg} {user_state}".strip()
-            print(f"   🔍 Searching raw: '{query}'")
+        if mode == "summary":  # Case C: State-wise discovery — top 3
+            last_msg = state["messages"][-1].content
+            # Use the user's actual message (contains their topic: agriculture, pension, etc.)
+            # expand_search_query enriches vague terms into better semantic search keywords
+            expanded_query = expand_search_query(last_msg)
+            query = f"{expanded_query} in {user_state}" if user_state else expanded_query
+            print(f"   🏛️ State Search — Query: '{query}'")
+            results = search_schemes(query, user_state=user_state, top_k=5)
+            results = results[:3]
 
-        # 4. Execute Search (Fixes the 'limit' error)
-        # Check if your search_schemes function actually supports 'limit'. 
-        # If it doesn't, remove 'limit=search_limit' below.
-        results = search_schemes(query) 
-        
-        # If your function doesn't support limit, manually slice the results here:
-        results = results[:search_limit]
-
-        if not results:
-            print("   ⚠️ No results found. Trying broad semantic search...")
-            results = search_schemes(last_msg)[:search_limit]
+        else:  # Case B: Full detail on one specific scheme
+            last_msg = state["messages"][-1].content
+            # Use the scheme name already extracted by IntentRouter if available
+            scheme_name = state.get("selected_scheme") or last_msg
+            name_prompt = (
+                f"Extract only the government scheme name from this text: '{scheme_name}'. "
+                f"Return ONLY the scheme name, nothing else. If none found, return 'NONE'."
+            )
+            extracted_name = safe_llm_call([SystemMessage(content=name_prompt)]).content.strip()
+            query = f"{extracted_name} scheme details benefits eligibility"
+            print(f"   🔍 Deep Dive search for: {extracted_name}")
+            results = search_schemes(query, user_state=user_state, top_k=3)
+            results = results[:1]
 
         print(f"   ✅ Found {len(results)} schemes.")
         return {"matched_schemes": results}
-        
+
     except Exception as e:
         print(f"❌ Direct Fetcher Error: {e}")
         return {"matched_schemes": []}
-# 2. Specialist: Audit Search (Case 2)
+
+# 2. Specialist: Profile Audit (Case A)
 def audit_fetcher_node(state: AgentState):
-    print("🤖 [Node: Audit Fetcher] Finding personal matches...")
+    print("🤖 [Node: Audit Fetcher] Finding personal matches (Case A)...")
     profile = state.get("user_profile", {})
-    
-    # Construct search query from JSON
-    audit_query = f"{profile.get('age')} {profile.get('gender')} {profile.get('caste')} {profile.get('state')} income {profile.get('income')}"
+
+    # --- Extract the user's TOPIC from their first message ---
+    # e.g. "scholarship", "pension", "farming subsidy", etc.
+    messages = state.get("messages", [])
+    user_messages = [m.content for m in messages if hasattr(m, 'type') and m.type == 'human']
+    if not user_messages:
+        # fallback: try duck-typing
+        from langchain_core.messages import HumanMessage
+        user_messages = [m.content for m in messages if isinstance(m, HumanMessage)]
+    first_user_msg = user_messages[0] if user_messages else ""
+
+    # Expand the user's original ask into better semantic keywords
+    topic_query = expand_search_query(first_user_msg) if first_user_msg else ""
+    print(f"   🔎 Topic query expanded: '{topic_query}'")
+
+    # Build profile token string (age, caste, state, income, occupation)
+    profile_tokens = " ".join(filter(None, [
+        str(profile.get('age', '')),
+        profile.get('gender', ''),
+        profile.get('caste', ''),
+        profile.get('state', ''),
+        f"income {profile.get('income', '')}",
+        profile.get('occupation', 'citizen')
+    ]))
+
+    # Combine topic + profile for a rich, targeted query
+    audit_query = f"{topic_query} {profile_tokens}".strip()
+    print(f"   🔎 Final audit query: '{audit_query}'")
 
     try:
-        results = search_schemes(audit_query)
-        if not results: return {"matched_schemes": []}
-        return {"messages": state["messages"],"matched_schemes": results[:3]} # Top 3 matches
+        results = search_schemes(audit_query, user_state=profile.get("state"))
+        return {"matched_schemes": results[:5]}
     except Exception as e:
         print(f"❌ Audit Fetcher Error: {e}")
         return {"matched_schemes": []}
 
-# 3. THE MAIN ENTRY POINT (This is what graph.py calls)
+# 3. THE MAIN ENTRY POINT (Graph Entry)
 def fetcher_node(state: AgentState):
-    """
-    This is the node registered in the graph. 
-    It routes to the specialists defined above.
-    """
     intent = state.get("intent")
     
-    if intent == "direct_info":
+    # Logic: Case B (Direct) and Case C (State) go to Direct Fetcher
+    # Case A (Eligibility) goes to Audit Fetcher
+    if intent in ["direct_info", "state_search"]:
         return direct_fetcher_node(state)
     else:
         return audit_fetcher_node(state)
      
 def strict_auditor_node(state: AgentState):
-    """
-    NODE 6: The Judge.
-    Performs a hard cross-reference between the user profile and the fetched schemes.
-    """
-    print("⚖️ [Node: Strict Auditor] Verifying 100% eligibility match...")
+    # Pass-through for Cases B & C
+    if state.get("intent") != "eligibility_audit":
+        return {"matched_schemes": state["matched_schemes"]}
 
+    print("⚖️ [Node: Strict Auditor] Verifying eligibility match...")
     profile = state.get("user_profile", {})
     matched_schemes = state.get("matched_schemes", [])
-    
-    if not matched_schemes:
-        return {"audited_schemes": [], "audit_status": "No matches found"}
 
-    # We ask the LLM to act as a strict logic gate
+    if not matched_schemes:
+        return {"matched_schemes": []}
+
     audit_prompt = f"""
-    You are a Strict Government Auditor. 
-    Compare the USER PROFILE against the PROVIDED SCHEMES.
+    You are a government scheme eligibility checker.
 
     USER PROFILE:
     {json.dumps(profile, indent=2)}
 
-    SCHEMES TO AUDIT:
-    {matched_schemes}
+    CANDIDATE SCHEMES:
+    {json.dumps(matched_schemes, indent=2)}
 
-    STRICT AUDIT RULES:
-    1. INCOME: If user income > scheme limit, REJECT.
-    2. AGE: If user age is outside scheme range, REJECT.
-    3. GENDER/CASTE/STATE: If any of these do not match the scheme requirements, REJECT.
-    4. VERDICT: You must be 100% sure. If a detail is missing in the scheme text, assume it's okay, but if it CONTRADICTS the profile, REJECT.
+    TASK:
+    Review each scheme and return the indices of schemes the user is LIKELY eligible for.
 
-    OUTPUT FORMAT:
-    Return a list of ONLY the schemes that passed 100%. 
-    For each, add a short "Audit Note" explaining why they qualify.
+    REJECTION RULES (apply strictly):
+    1. Scheme is explicitly for a different caste category that excludes the user's caste.
+    2. User's income clearly EXCEEDS the scheme's income limit.
+    3. Scheme is explicitly women-only and user is male (or vice versa).
+    4. Scheme is for a different state and is NOT a Central/national scheme.
+
+    IMPORTANT:
+    - If eligibility criteria are unclear or not stated, INCLUDE the scheme (give benefit of doubt).
+    - Scholarship and education schemes for SC/ST students should generally be included for SC users.
+    - Prefer to INCLUDE rather than REJECT when in doubt.
+    - Return ONLY a JSON list of passing indices, e.g. [0, 1, 2]. If truly none pass, return [0, 1] (top 2 as fallback).
     """
 
     response = safe_llm_call([SystemMessage(content=audit_prompt)])
-    
-    # We let the Clerk handle the final beauty, but the Auditor decides the 'Truth'
-    print(f"   -> Audit complete. Status: Strict logic applied.")
-    
-    # This node passes the 'Verified' schemes to the Clerk
-    return {"matched_schemes": response.content} # Passes filtered content
+
+    try:
+        clean = response.content.strip().replace("```json", "").replace("```", "")
+        eligible_indices = json.loads(clean)
+        # Safety: if LLM returns empty, fall back to top 2
+        if not eligible_indices:
+            eligible_indices = list(range(min(2, len(matched_schemes))))
+        final_schemes = [matched_schemes[i] for i in eligible_indices if i < len(matched_schemes)]
+    except:
+        final_schemes = matched_schemes[:2]
+
+    print(f"   -> Audit complete. {len(final_schemes)} schemes verified.")
+    return {"matched_schemes": final_schemes}
+
+   
 
 def response_clerk_node(state: AgentState):
-    print("🎨 [Node: Response Clerk] Formatting final output...")
-    
-    # 1. Grab the search results from the state
+    mode = state.get("response_mode", "list_only")
+    print(f"🎨 [Node: Response Clerk] Mode: {mode}")
+
     schemes = state.get("matched_schemes", [])
-    
-    # 2. Safety Check: If the list is empty, explain why
-    if not schemes:
-        print("   ⚠️ Clerk found NO schemes in state.")
-        return {"final_response": "I searched our database but couldn't find a matching scheme for your specific request. Could you try giving me the exact name?"}
 
-    # 3. Use the TOP result from your Vector Search
-    top_scheme = schemes[0]
-    
-    # 4. Create a prompt that FORCES the LLM to use this specific data
-    clerk_prompt = f"""
-    You are the SevaSetu Assistant. Your goal is to present the following government scheme to the user in a beautiful, structured format.
+    if not schemes or not isinstance(schemes, list):
+        profile = state.get("user_profile", {})
+        state_name = profile.get("state", "your state")
+        caste = profile.get("caste", "")
+        occupation = profile.get("occupation", "")
+        no_results_msg = f"""## SCHEME_DETAIL
 
-    DATA TO USE:
-    Scheme Name: {top_scheme.get('scheme_name')}
-    State: {top_scheme.get('state')}
-    Description: {top_scheme.get('details')}
-    Benefits: {top_scheme.get('benefits')}
-    Documents: {top_scheme.get('documents')}
-    Steps: {top_scheme.get('application')}
+# No Matching Schemes Found
 
-    FORMATTING RULES:
-    - Use '### 🌟 Objective' for the description.
-    - Use '### 💰 Financial Benefits' for the benefits (This triggers the GREEN card).
-    - Use '### 📋 Required Documents' for the docs (This triggers the ORANGE card).
-    - Use '### 🚀 Application Process' for the steps. Format as '1. **Step Name**: Details'.
-    - DO NOT add any intro text like "I found this...". Start with the first header.
-    """
+### 🎯 Objective
+I wasn't able to find government schemes that precisely match your current profile in our database.
+
+### 💰 Financial Benefits
+This doesn't mean schemes don't exist — it may mean our database doesn't yet have enough coverage for your specific combination of criteria ({caste} {occupation} in {state_name}).
+
+### 📋 Required Documents
+- Visit the official MyScheme portal: https://www.myscheme.gov.in
+- Try the National Scholarship Portal: https://scholarships.gov.in
+- Contact your nearest Seva Kendra or Common Service Centre (CSC)
+
+### 🚀 Application Process
+1. Go to myscheme.gov.in and use their eligibility filter
+2. Select your state: {state_name}
+3. Fill in your profile details to get a curated list
+4. Alternatively, ask me to search for a specific scheme by name"""
+        return {"final_response": no_results_msg}
+
+    # ── CASE A: Profile Audit — name + financial benefit only ──────────────────
+    if mode == "list_only":
+        data_to_pass = schemes[:5]
+        clerk_prompt = f"""
+You are SevaSetu. A user has undergone a profile eligibility audit.
+Format the results using EXACTLY this structure:
+
+## ELIGIBLE_SCHEMES
+
+1. [Scheme Name]
+   Financial Benefit: [One line describing the monetary/material benefit]
+
+2. [Scheme Name]
+   Financial Benefit: [One line describing the monetary/material benefit]
+
+(and so on for all schemes)
+
+STRICT RULES:
+- Begin the response with the exact line: ## ELIGIBLE_SCHEMES
+- Number each scheme starting from 1.
+- Show ONLY scheme name and financial benefit. Nothing else.
+- Do NOT add eligibility criteria, documents, application steps, or any other info.
+- Do NOT add any intro or conclusion text.
+- Use the data: {json.dumps(data_to_pass)}
+"""
+
+    # ── CASE B: Direct Explanation — full scheme detail ─────────────────────────
+    elif mode == "full_detail":
+        data_to_pass = schemes[:1]
+        clerk_prompt = f"""
+You are SevaSetu. A user asked for full details about a specific scheme.
+Format the response using EXACTLY this structure:
+
+## SCHEME_DETAIL
+
+# [Scheme Name]
+
+### 🎯 Objective
+[2-3 sentences describing the scheme's purpose]
+
+### 💰 Financial Benefits
+[Describe the exact monetary or material benefits]
+
+### 📋 Required Documents
+- [Document 1]
+- [Document 2]
+- [Document 3]
+(list all documents)
+
+### 🚀 Application Process
+1. [Step one]
+2. [Step two]
+3. [Step three]
+(list all steps)
+
+STRICT RULES:
+- Begin with the exact line: ## SCHEME_DETAIL
+- Use the exact section headers shown above.
+- Do NOT skip any section.
+- Do NOT add intro or conclusion text outside the structure.
+- Use the data: {json.dumps(data_to_pass)}
+"""
+
+    # ── CASE C: State Discovery — name + eligibility + financial benefit ─────────
+    else:  # summary
+        data_to_pass = schemes[:3]
+        clerk_prompt = f"""
+You are SevaSetu. A user asked for top schemes in a state.
+Format the results using EXACTLY this structure:
+
+## STATE_SCHEMES
+
+1. [Scheme Name]
+   Eligibility: [One line — who qualifies]
+   Financial Benefit: [One line — what benefit they get]
+
+2. [Scheme Name]
+   Eligibility: [One line — who qualifies]
+   Financial Benefit: [One line — what benefit they get]
+
+3. [Scheme Name]
+   Eligibility: [One line — who qualifies]
+   Financial Benefit: [One line — what benefit they get]
+
+STRICT RULES:
+- Begin with the exact line: ## STATE_SCHEMES
+- Show ONLY scheme name, eligibility, and financial benefit.
+- Number exactly 3 schemes.
+- Do NOT add application steps, documents, or any other sections.
+- Do NOT add intro or conclusion text.
+- Use the data: {json.dumps(data_to_pass)}
+"""
 
     response = safe_llm_call([SystemMessage(content=clerk_prompt)])
-    
-    return {"final_response": response.content}
+    return {"final_response": response.content.strip()}
