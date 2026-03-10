@@ -28,12 +28,16 @@ workflow.add_node("Clerk", response_clerk_node)
 # 3. DEFINE ROUTING FUNCTIONS
 
 def route_intent(state: AgentState):
-    """Splits flow into Case 1 (Direct Info) or Case 2 (Eligibility Audit)."""
     intent = state.get("intent")
     print(f"DEBUG: Intent detected -> {intent}")
+    
+    # Case A: Profile Audit needs the Interviewer
     if intent == "eligibility_audit":
         return "audit_path"
+    
+    # Case B (Direct Info) AND Case C (State Search) go to Solicitor/DirectFetcher
     return "direct_path"
+
 
 def check_solicitor_status(state: AgentState):
     """CASE 1: Stop if Solicitor asked a question, otherwise go to Direct Fetcher."""
@@ -62,28 +66,33 @@ def check_interviewer_status(state: AgentState):
     return "wait"
 
 def route_after_fetch(state: AgentState):
-    """Direct Info skips Auditor; Eligibility Audit MUST go through Auditor."""
+    """
+    If it's Case A (Audit), go through the Auditor.
+    If it's Case B or C, go straight to the Clerk.
+    """
     if state.get("intent") == "eligibility_audit":
         return "audit"
     return "clerk"
 
 # 4. DEFINE THE FLOW (EDGES)
 
-# Start with Profile Management
+# --- 4. DEFINE THE FLOW (EDGES) ---
+
+# Entry Point
 workflow.add_edge(START, "ProfileManager")
 workflow.add_edge("ProfileManager", "IntentRouter")
 
-# Intent Routing
+# 🚦 ROUTE 1: The First Split
 workflow.add_conditional_edges(
     "IntentRouter",
     route_intent,
     {
-        "audit_path": "Interviewer", 
-        "direct_path": "Solicitor"
+        "audit_path": "Interviewer", # Case A
+        "direct_path": "Solicitor"   # Case B & C
     }
 )
 
-# Case 1: Solicitor Branch
+# 🏢 BRANCH: Solicitor (Case B & C)
 workflow.add_conditional_edges(
     "Solicitor",
     check_solicitor_status,
@@ -94,7 +103,7 @@ workflow.add_conditional_edges(
 )
 workflow.add_edge("DirectFetcher", "Clerk")
 
-# Case 2: Interviewer Branch
+# 🎤 BRANCH: Interviewer (Case A)
 workflow.add_conditional_edges(
     "Interviewer",
     check_interviewer_status,
@@ -104,7 +113,7 @@ workflow.add_conditional_edges(
     }
 )
 
-# Shared Path after Fetcher (Case 2 only)
+# ⚖️ FINAL JUNCTION: To Audit or Not to Audit?
 workflow.add_conditional_edges(
     "Fetcher",
     route_after_fetch,
@@ -114,7 +123,7 @@ workflow.add_conditional_edges(
     }
 )
 
-# Final formatting
+# Finish Line
 workflow.add_edge("Auditor", "Clerk")
 workflow.add_edge("Clerk", END)
 
