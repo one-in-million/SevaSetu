@@ -33,7 +33,37 @@ export default function SevaSetuPortal() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+  const inputRef = useRef<string>("");
 
+  const handleSchemeClick = (schemeName: string) => {
+    setInput(`Explain ${schemeName}`);
+    inputRef.current = `Explain ${schemeName}`;
+    // Small delay to let state settle, then send
+    setTimeout(() => {
+      const syntheticSend = async () => {
+        const msg = `Explain ${schemeName}`;
+        if (!msg.trim()) return;
+        setMessages(prev => [...prev, { role: "user", content: msg }]);
+        setInput("");
+        setLoading(true);
+        try {
+          const res = await fetch("http://localhost:8000/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, message: msg }),
+          });
+          const data = await res.json();
+          setMessages(prev => [...prev, { role: "assistant", content: data.response }]);
+        } catch {
+          setMessages(prev => [...prev, { role: "assistant", content: "⚠️ Technical Error: Please ensure the backend server is active." }]);
+        } finally {
+          setLoading(false);
+        }
+      };
+      syntheticSend();
+    }, 50);
+  };
+  
   const handleSendMessage = async () => {
     if (!input.trim()) return;
     const userMsg = { role: "user", content: input };
@@ -58,86 +88,191 @@ export default function SevaSetuPortal() {
 
   // --- THE CHAT PRESENTATION ENGINE ---
   const renderFormattedContent = (content: string) => {
-    if (!content.includes('###')) {
+
+    // ── CASE A: ## ELIGIBLE_SCHEMES ─────────────────────────────────────────────
+    if (content.includes('## ELIGIBLE_SCHEMES')) {
+      const body = content.replace('## ELIGIBLE_SCHEMES', '').trim();
+      // Parse numbered entries: "1. Scheme Name\n   Financial Benefit: ..."
+      const entries = body.split(/\n(?=\d+\.)/).filter(e => e.trim());
       return (
-        <div className="text-slate-700 whitespace-pre-wrap" dangerouslySetInnerHTML={{ 
-          __html: content.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') 
-        }} />
+        <div>
+          <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">
+            ✅ Schemes You May Be Eligible For
+          </p>
+          <div className="space-y-3">
+            {entries.map((entry, i) => {
+              const lines = entry.split('\n').map(l => l.trim()).filter(Boolean);
+              const titleLine = lines[0]?.replace(/^\d+\.\s*/, '').trim() ?? '';
+              const benefitLine = lines.find(l => l.toLowerCase().startsWith('financial benefit')) ?? '';
+              const benefit = benefitLine.replace(/financial benefit:\s*/i, '').trim();
+              return (
+                <div
+                  key={i}
+                  onClick={() => handleSchemeClick(titleLine)}
+                  className="flex items-start gap-3 p-4 bg-emerald-50 border border-emerald-200 rounded-xl cursor-pointer hover:bg-emerald-100 hover:border-emerald-400 transition-all group active:scale-[0.98]"
+                >
+                  <div className="w-7 h-7 rounded-full bg-emerald-500 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">
+                    {i + 1}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-emerald-900 text-sm">{titleLine}</p>
+                    {benefit && (
+                      <p className="text-emerald-700 text-xs mt-1">
+                        <span className="font-semibold">💰 </span>{benefit}
+                      </p>
+                    )}
+                  </div>
+                  <ChevronRight size={14} className="text-emerald-400 group-hover:text-emerald-600 mt-1 shrink-0 transition-colors" />
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-3 text-center">Click any scheme to get full details</p>
+        </div>
       );
     }
 
-    return content.split('###').map((section, idx) => {
-      if (!section.trim()) return null;
-      const lowerSection = section.toLowerCase();
-
-      // 1. 💰 FINANCIAL BENEFITS (Green Card)
-      if (lowerSection.includes("financial benefits") || lowerSection.includes("💰")) {
-        const body = section.split('\n').slice(1).join('\n').trim();
-        return (
-          <div key={idx} className="my-4 p-5 bg-emerald-50 rounded-2xl border border-emerald-100 border-l-4 border-l-emerald-500 shadow-sm">
-            <h4 className="text-emerald-800 font-bold flex items-center gap-2 mb-2 text-xs uppercase tracking-widest">
-              <Landmark size={16}/> Financial Benefits
-            </h4>
-            <div className="text-emerald-700 text-sm whitespace-pre-line leading-relaxed font-medium" 
-                 dangerouslySetInnerHTML={{ __html: body.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
-          </div>
-        );
-      }
-
-      // 2. 📋 DOCUMENT CHECKLIST (Orange Checklist)
-      if ((lowerSection.includes("prerequisites") || lowerSection.includes("checklist")) && !lowerSection.includes("application process")) {
-        const items = section.split('\n').filter(line => line.trim().startsWith('-') || line.trim().match(/^[0-9]\./));
-        return (
-          <div key={idx} className="my-4 p-5 bg-orange-50 rounded-2xl border border-orange-100">
-            <h4 className="text-orange-800 font-bold flex items-center gap-2 mb-4 text-xs uppercase tracking-widest">
-              <FileText size={16}/> Required Documents
-            </h4>
-            <div className="grid gap-2">
-              {items.map((item, i) => (
-                <div key={i} className="flex items-center gap-3 bg-white/60 p-3 rounded-xl border border-orange-200/20 shadow-sm">
-                  <CheckCircle size={14} className="text-orange-500" />
-                  <span className="text-sm text-slate-700 font-medium">{item.replace(/^[-0-9.]\s*/, '').trim()}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      }
-
-      // 3. 🚀 APPLICATION PROCESS (Clean Steps)
-      if (lowerSection.includes("application process") || lowerSection.includes("🚀")) {
-        const steps = section.split(/\n\d+\.\s+/).filter(s => s.trim().length > 5);
-        return (
-          <div key={idx} className="mt-8 mb-4 border-l-2 border-slate-100 ml-3 pl-8 relative">
-            <h4 className="text-slate-800 font-bold flex items-center gap-2 mb-6 text-xs uppercase tracking-widest -ml-8 bg-white pr-4 w-fit">
-              <Zap size={16} className="text-orange-500"/> Step-by-Step Guide
-            </h4>
-            {steps.map((step, i) => (
-              <div key={i} className="relative mb-8 last:mb-0">
-                <div className="absolute -left-[41px] top-0 w-6 h-6 rounded-full bg-orange-500 flex items-center justify-center text-[10px] font-bold text-white shadow-md border-4 border-white">
-                  {i + 1}
-                </div>
-                <div className="text-[14px] text-slate-600 leading-relaxed" 
-                     dangerouslySetInnerHTML={{ __html: step.replace(/\*\*(.*?)\*\*/g, '<b class="text-slate-900">$1</b>').trim() }} />
-              </div>
-            ))}
-          </div>
-        );
-      }
-
-      // DEFAULT: Objective or General Text
-      const title = section.split('\n')[0].replace(/[#*🌟🛡️]/g, '').trim();
-      const body = section.split('\n').slice(1).join('\n').trim();
+    // ── CASE C: ## STATE_SCHEMES ────────────────────────────────────────────────
+    if (content.includes('## STATE_SCHEMES')) {
+      const body = content.replace('## STATE_SCHEMES', '').trim();
+      const entries = body.split(/\n(?=\d+\.)/).filter(e => e.trim());
       return (
-        <div key={idx} className="mb-6 last:mb-0">
-          <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{title}</h4>
-          <div className="text-slate-700 text-[15px] leading-relaxed whitespace-pre-line"
-               dangerouslySetInnerHTML={{ __html: body.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
+        <div>
+          <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">
+            🏛️ Top Schemes in Your State
+          </p>
+          <div className="space-y-3">
+            {entries.map((entry, i) => {
+              const lines = entry.split('\n').map(l => l.trim()).filter(Boolean);
+              const titleLine = lines[0]?.replace(/^\d+\.\s*/, '').trim() ?? '';
+              const eligLine = lines.find(l => l.toLowerCase().startsWith('eligibility')) ?? '';
+              const benefitLine = lines.find(l => l.toLowerCase().startsWith('financial benefit')) ?? '';
+              const eligibility = eligLine.replace(/eligibility:\s*/i, '').trim();
+              const benefit = benefitLine.replace(/financial benefit:\s*/i, '').trim();
+              return (
+                <div
+                  key={i}
+                  onClick={() => handleSchemeClick(titleLine)}
+                  className="p-4 bg-orange-50 border border-orange-200 rounded-xl cursor-pointer hover:bg-orange-100 hover:border-orange-400 transition-all group active:scale-[0.98]"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="font-bold text-orange-900 text-sm">{titleLine}</p>
+                    <ChevronRight size={14} className="text-orange-400 group-hover:text-orange-600 shrink-0 transition-colors" />
+                  </div>
+                  {eligibility && (
+                    <p className="text-orange-800 text-xs">
+                      <span className="font-semibold">👤 Eligibility: </span>{eligibility}
+                    </p>
+                  )}
+                  {benefit && (
+                    <p className="text-orange-700 text-xs mt-1">
+                      <span className="font-semibold">💰 Benefit: </span>{benefit}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-3 text-center">Click any scheme to get full details</p>
         </div>
       );
-    });
-  };
+    }
 
+    // ── CASE B: ## SCHEME_DETAIL ───────────────────────────────────────────────
+    if (content.includes('## SCHEME_DETAIL')) {
+      const body = content.replace('## SCHEME_DETAIL', '').trim();
+      const sections = body.split(/\n(?=###\s)/);
+
+      // Extract scheme name from # heading
+      const nameMatch = body.match(/^#\s+(.+)$/m);
+      const schemeName = nameMatch ? nameMatch[1].trim() : '';
+
+      return (
+        <div className="space-y-4">
+          {schemeName && (
+            <h3 className="text-lg font-black text-slate-900 pb-2 border-b border-slate-100">{schemeName}</h3>
+          )}
+          {sections.map((section, i) => {
+            if (!section.trim() || section.startsWith('#') && !section.startsWith('###')) return null;
+            const headerMatch = section.match(/^###\s+(.+)$/m);
+            if (!headerMatch) return null;
+            const header = headerMatch[1].trim();
+            const sectionBody = section.replace(/^###\s+.+$/m, '').trim();
+            const lowerHeader = header.toLowerCase();
+
+            // 💰 Financial Benefits
+            if (lowerHeader.includes('financial') || lowerHeader.includes('💰')) {
+              return (
+                <div key={i} className="p-4 bg-emerald-50 border border-emerald-100 border-l-4 border-l-emerald-500 rounded-xl">
+                  <h4 className="text-xs font-black text-emerald-700 uppercase tracking-widest mb-2 flex items-center gap-1">
+                    <Landmark size={12} /> Financial Benefits
+                  </h4>
+                  <p className="text-emerald-800 text-sm leading-relaxed whitespace-pre-line"
+                     dangerouslySetInnerHTML={{ __html: sectionBody.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
+                </div>
+              );
+            }
+
+            // 📋 Documents
+            if (lowerHeader.includes('document') || lowerHeader.includes('📋')) {
+              const items = sectionBody.split('\n').filter(l => l.trim().startsWith('-'));
+              return (
+                <div key={i} className="p-4 bg-orange-50 border border-orange-100 rounded-xl">
+                  <h4 className="text-xs font-black text-orange-700 uppercase tracking-widest mb-3 flex items-center gap-1">
+                    <FileText size={12} /> Required Documents
+                  </h4>
+                  <div className="grid gap-2">
+                    {items.map((item, j) => (
+                      <div key={j} className="flex items-center gap-2 bg-white/70 px-3 py-2 rounded-lg border border-orange-100">
+                        <CheckCircle size={12} className="text-orange-500 shrink-0" />
+                        <span className="text-sm text-slate-700">{item.replace(/^-\s*/, '').trim()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            }
+
+            // 🚀 Application Process
+            if (lowerHeader.includes('application') || lowerHeader.includes('🚀')) {
+              const steps = sectionBody.split(/\n\d+\.\s+/).filter(s => s.trim().length > 3);
+              return (
+                <div key={i} className="border-l-2 border-slate-200 ml-3 pl-6 relative mt-2">
+                  <h4 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 -ml-6 flex items-center gap-1">
+                    <Zap size={12} className="text-orange-500" /> Application Steps
+                  </h4>
+                  {steps.map((step, j) => (
+                    <div key={j} className="relative mb-5 last:mb-0">
+                      <div className="absolute -left-[29px] top-0 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center text-[9px] font-bold text-white border-2 border-white">
+                        {j + 1}
+                      </div>
+                      <p className="text-sm text-slate-600 leading-relaxed"
+                         dangerouslySetInnerHTML={{ __html: step.replace(/\*\*(.*?)\*\*/g, '<b class="text-slate-900">$1</b>').trim() }} />
+                    </div>
+                  ))}
+                </div>
+              );
+            }
+
+            // 🎯 Objective / default section
+            return (
+              <div key={i} className="mb-2">
+                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">{header.replace(/[🎯💰📋🚀]/g, '').trim()}</h4>
+                <p className="text-slate-700 text-sm leading-relaxed whitespace-pre-line"
+                   dangerouslySetInnerHTML={{ __html: sectionBody.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // ── FALLBACK: Plain text ────────────────────────────────────────────────────
+    return (
+      <div className="text-slate-700 text-sm leading-relaxed whitespace-pre-wrap"
+           dangerouslySetInnerHTML={{ __html: content.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
+    );
+  };
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-orange-100">
       
