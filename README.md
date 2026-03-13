@@ -75,6 +75,11 @@ SevaSetu follows an **Agentic State Machine** pattern:
 
 ## 🚦 Getting Started
 
+### Prerequisites
+* [uv](https://docs.astral.sh/uv/) (Python Project Manager)
+* [pnpm](https://pnpm.io/) (Node Package Manager)
+* PostgreSQL & Qdrant Cloud Account
+
 ### 1. Clone & Install
 ```bash
 git clone https://github.com/your-username/sevasetu.git
@@ -90,11 +95,16 @@ QDRANT_URL=your_url
 QDRANT_API_KEY=your_key
 ```
 
-### Then, install dependencies and launch the server:
+
+
+### 2.1. Backend Setup (using uv)
+Navigate to the backend directory. `uv` will automatically handle the virtual environment and Python 3.12 compatibility.
+
+
 ```bash
 cd backend
-pip install -r requirements.txt
-python main.py
+uv sync
+uv run python main.py                  
 ```
 
 ### 3. Setup frontend
@@ -102,8 +112,11 @@ In a separate terminal, install the dependencies and start the development serve
 
 ```bash
 cd frontend
-npm install
-npm run dev
+# Install dependencies
+pnpm install
+
+# Start the development server
+pnpm dev
 ```
 ## 📝 Example Prompts
 
